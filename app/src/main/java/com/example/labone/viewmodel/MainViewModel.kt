@@ -1,81 +1,89 @@
 package com.example.labone.viewmodel
 
 import androidx.lifecycle.ViewModel
-import com.example.labone.data.HealthStatus
+import androidx.lifecycle.viewModelScope
 import com.example.labone.data.Product
+import com.example.labone.data.ProductRepository
+import com.example.labone.ui.ProductUiEvent
+import com.example.labone.ui.ProductUiState
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
 
-class MainViewModel : ViewModel() {
+class MainViewModel(
+    private val repository: ProductRepository
+) : ViewModel() {
 
-    private val initialProducts = listOf(
-        Product(
-            id = 1,
-            barcode = "4601234567890",
-            name = "Молоко 3.2%",
-            category = "Молочные",
-            ingredients = "Цельное молоко, обезжиренное молоко",
-            calories = 60,
-            healthStatus = HealthStatus.SAFE,
-            isFavorite = true
-        ),
-        Product(
-            id = 2,
-            barcode = "4609876543210",
-            name = "Газированный напиток Cola",
-            category = "Напитки",
-            ingredients = "Вода, сахар, краситель Е150d, ортофосфорная кислота, кофеин",
-            calories = 42,
-            healthStatus = HealthStatus.DANGEROUS,
-            isFavorite = false
-        ),
-        Product(
-            id = 3,
-            barcode = "4605554433221",
-            name = "Шоколад фундучный",
-            category = "Сладости",
-            ingredients = "Какао тертое, сахар, масло какао, дробленый фундук, лецитин, ароматизатор",
-            calories = 540,
-            healthStatus = HealthStatus.WARNING,
-            isFavorite = false
-        )
-    )
+    private val _uiState = MutableStateFlow<ProductUiState>(ProductUiState.Loading)
+    val uiState: StateFlow<ProductUiState> = _uiState.asStateFlow()
 
-    private val _products = MutableStateFlow<List<Product>>(initialProducts)
-    val products: StateFlow<List<Product>> = _products.asStateFlow()
-
-    private val _searchQuery = MutableStateFlow("")
-    val searchQuery: StateFlow<String> = _searchQuery.asStateFlow()
-
-    private val _selectedCategory = MutableStateFlow("Все")
-    val selectedCategory: StateFlow<String> = _selectedCategory.asStateFlow()
-
-    fun onSearchQueryChange(query: String) {
-        _searchQuery.value = query
+    init {
+        loadProducts()
     }
 
-    fun onCategorySelect(category: String) {
-        _selectedCategory.value = category
-    }
+    private fun loadProducts() {
+        viewModelScope.launch {
+            repository.getProducts().collect { products ->
+                val currentState = _uiState.value
+                val searchQuery = if (currentState is ProductUiState.Success) currentState.searchQuery else ""
+                val selectedCat = if (currentState is ProductUiState.Success) currentState.selectedCategory else "Все"
 
-    fun toggleFavorite(productId: Int) {
-        _products.value = _products.value.map { product ->
-            if (product.id == productId) product.copy(isFavorite = !product.isFavorite)
-            else product
+                _uiState.value = ProductUiState.Success(
+                    products = products,
+                    filteredProducts = filterProducts(products, searchQuery, selectedCat),
+                    searchQuery = searchQuery,
+                    selectedCategory = selectedCat
+                )
+            }
         }
     }
 
-    fun addProduct(name: String, barcode: String, category: String, ingredients: String, calories: Int, status: HealthStatus) {
-        val newProduct = Product(
-            id = (_products.value.maxOfOrNull { it.id } ?: 0) + 1,
-            barcode = barcode.ifBlank { "0000000000000" },
-            name = name,
-            category = category.ifBlank { "Общее" },
-            ingredients = ingredients,
-            calories = calories,
-            healthStatus = status
-        )
-        _products.value = _products.value + newProduct
+    fun onEvent(event: ProductUiEvent) {
+        val state = _uiState.value as? ProductUiState.Success ?: return
+
+        when (event) {
+            is ProductUiEvent.SearchQueryChanged -> {
+                val filtered = filterProducts(state.products, event.query, state.selectedCategory)
+                _uiState.value = state.copy(searchQuery = event.query, filteredProducts = filtered)
+            }
+            is ProductUiEvent.CategorySelected -> {
+                val filtered = filterProducts(state.products, state.searchQuery, event.category)
+                _uiState.value = state.copy(selectedCategory = event.category, filteredProducts = filtered)
+            }
+            is ProductUiEvent.ToggleFavorite -> {
+                viewModelScope.launch {
+                    repository.toggleFavorite(event.productId)
+                }
+            }
+            is ProductUiEvent.SelectProductByBarcode -> {
+                val product = state.products.find { it.barcode == event.barcode || it.id.toString() == event.barcode }
+                _uiState.value = state.copy(selectedProduct = product)
+            }
+            is ProductUiEvent.AddProduct -> {
+                viewModelScope.launch {
+                    val newProduct = Product(
+                        id = (state.products.maxOfOrNull { it.id } ?: 0) + 1,
+                        barcode = event.barcode,
+                        name = event.name,
+                        category = event.category,
+                        ingredients = event.ingredients,
+                        calories = event.calories,
+                        healthStatus = event.healthStatus
+                    )
+                    repository.addProduct(newProduct)
+                }
+            }
+        }
+    }
+
+    private fun filterProducts(products: List<Product>, query: String, category: String): List<Product> {
+        return products.filter { product ->
+            val matchesCategory = category == "Все" || product.category.equals(category, ignoreCase = true)
+            val matchesQuery = query.isEmpty() ||
+                    product.name.contains(query, ignoreCase = true) ||
+                    product.barcode.contains(query, ignoreCase = true)
+            matchesCategory && matchesQuery
+        }
     }
 }
